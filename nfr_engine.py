@@ -9,7 +9,7 @@ import struct
 import os
 import sys
 
-# --- HYPERPARAMETRES DU NOYAU ---
+# --- CORE HYPERPARAMETERS ---
 CONFIG = {
     'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     'hidden_size': 512,
@@ -20,7 +20,7 @@ CONFIG = {
     'epochs': 5 # Low for PoC speed
 }
 
-# --- CONFIGURATION DU NOYAU DAEMON (ARITHMETIC CODING) ---
+# --- DAEMON CORE CONFIGURATION (ARITHMETIC CODING) ---
 CODE_VALUE_BITS = 32
 TOP_VALUE = (1 << CODE_VALUE_BITS) - 1
 QUARTER = 1 << (CODE_VALUE_BITS - 2)
@@ -29,51 +29,51 @@ THREE_QUARTERS = 3 * QUARTER
 
 class DaemonArithmeticCoder:
     """
-    Implémentation haute précision d'un codeur arithmétique.
-    Conçu pour s'interfacer avec les tensors de probabilité du NeuralPredictor.
+    High-precision Arithmetic Coder implementation.
+    Designed to interface with probability tensors from NeuralPredictor.
     """
     def __init__(self):
         self.low = 0
         self.high = TOP_VALUE
         self.pending_bits = 0
-        self.buffer = []  # Buffer de bits compressés
+        self.buffer = []  # Compressed bit buffer
 
     def _transmit_bit(self, bit):
-        """Écrit un bit dans le buffer (et gère les bits en attente/carry)."""
+        """Writes a bit to buffer (handling pending bits/carry)."""
         self.buffer.append(bit)
-        # Gestion des bits en attente (cas de sous-dépassement)
+        # Handle underflow cases
         while self.pending_bits > 0:
             self.buffer.append(1 - bit)
             self.pending_bits -= 1
 
     def encode_symbol(self, symbol_idx, pdf_tensor):
         """
-        Encode un symbole basé sur la distribution de probabilité fournie par le NeuralPredictor.
+        Encodes a symbol based on the probability distribution provided by NeuralPredictor.
         Args:
-            symbol_idx (int): L'octet réel à encoder (0-255).
-            pdf_tensor (torch.Tensor): Tensor 1D de probabilités (somme = 1.0).
+            symbol_idx (int): Actual byte to encode (0-255).
+            pdf_tensor (torch.Tensor): 1D PDF Tensor (sum = 1.0).
         """
-        # 1. Conversion des probabilités flottantes en fréquences cumulatives entières
+        # 1. Convert float probs to integer Cumulative Frequencies
         scale_factor = 16384 # 2^14
         
-        # Calcul rapide de la CDF
+        # Fast CDF calc
         cdf = torch.cumsum(pdf_tensor, dim=0)
         
-        # S'assurer que le dernier élément est exactement scale_factor
+        # Ensure last element is exactly scale_factor
         cdf_int = (cdf * scale_factor).long()
         cdf_int[-1] = scale_factor 
         
-        # Récupération des bornes pour le symbole actuel
+        # Get bounds for current symbol
         low_count = 0 if symbol_idx == 0 else cdf_int[symbol_idx - 1].item()
         high_count = cdf_int[symbol_idx].item()
         total_count = scale_factor
 
-        # 2. Rétrécissement de l'intervalle global
+        # 2. Narrowing global range
         current_range = self.high - self.low + 1
         self.high = self.low + (current_range * high_count) // total_count - 1
         self.low = self.low + (current_range * low_count) // total_count
 
-        # 3. Renormalisation (Emission de bits)
+        # 3. Renormalization (Bit Emission)
         while True:
             if self.high < HALF:
                 self._transmit_bit(0)
@@ -92,7 +92,7 @@ class DaemonArithmeticCoder:
             self.high = ((self.high << 1) & TOP_VALUE) | 1
 
     def finish(self):
-        """Finalise le flux (flush des derniers bits)."""
+        """Finalize stream (flush remaining bits)."""
         self.pending_bits += 1
         if self.low < QUARTER:
             self._transmit_bit(0)
@@ -102,7 +102,7 @@ class DaemonArithmeticCoder:
 
 class DaemonDecoder:
     """
-    Décodeur symétrique.
+    Symmetric Decoder.
     """
     def __init__(self, bitstream):
         self.bitstream = bitstream
@@ -111,13 +111,13 @@ class DaemonDecoder:
         self.high = TOP_VALUE
         self.value = 0
         
-        # Initialisation du buffer interne avec les premiers bits
+        # Initial fill of internal buffer
         for _ in range(CODE_VALUE_BITS):
             self.value = (self.value << 1) | self._read_bit()
 
     def _read_bit(self):
         if self.bit_idx >= len(self.bitstream):
-            return 0 # Padding final
+            return 0 # Final Padding
         bit = self.bitstream[self.bit_idx]
         self.bit_idx += 1
         return bit
@@ -129,22 +129,21 @@ class DaemonDecoder:
         cdf_int[-1] = scale_factor
         
         current_range = self.high - self.low + 1
-        # Mapping inverse
+        # Inverse Mapping
         mapped_value = ((self.value - self.low + 1) * scale_factor - 1) // current_range
         
-        # Recherche du symbole correspondant
-        # torch.searchsorted trouve l'index où insérer mapped_value pour garder l'ordre.
-        # cdf_int[i-1] <= mapped_value < cdf_int[i]
+        # Symbol Search
+        # torch.searchsorted finds index to insert mapped_value keeping order.
         symbol_idx = torch.searchsorted(cdf_int, mapped_value).item()
         
-        # Mise à jour des bornes (exactement comme l'encodeur)
+        # Create bounds (exact match with encoder)
         low_count = 0 if symbol_idx == 0 else cdf_int[symbol_idx - 1].item()
         high_count = cdf_int[symbol_idx].item()
         
         self.high = self.low + (current_range * high_count) // scale_factor - 1
         self.low = self.low + (current_range * low_count) // scale_factor
         
-        # Renormalisation
+        # Renormalization
         while True:
             if self.high < HALF:
                 pass 
@@ -191,7 +190,7 @@ def train_model(model, data_indices):
     criterion = nn.CrossEntropyLoss()
     model.train()
     
-    print("[SYSTEM] Démarrage de l'entrainement...")
+    print("[SYSTEM] Starting training...")
     for epoch in range(CONFIG['epochs']):
         epoch_loss = 0
         chunks = 0

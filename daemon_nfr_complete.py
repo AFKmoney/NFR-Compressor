@@ -8,7 +8,7 @@ import struct
 import time
 import numpy as np
 
-# --- CONFIGURATION DAEMON ---
+# --- DAEMON CONFIGURATION ---
 CODE_VALUE_BITS = 32
 TOP_VALUE = (1 << CODE_VALUE_BITS) - 1
 QUARTER = 1 << (CODE_VALUE_BITS - 2)
@@ -29,13 +29,13 @@ CONFIG = {
 MODEL_SEQ_LEN = CONFIG['seq_len']
 
 class BitStreamIO:
-    """Gère l'écriture/lecture physique des bits dans un fichier .DMN"""
+    """Handles physical read/write of bits in a .DMN file"""
     def __init__(self, filename, mode='wb'):
         self.file = open(filename, mode)
         self.buffer = 0
         self.count = 0
         self.mode = mode
-        # Pour la lecture
+        # For reading
         if 'r' in mode:
             # We will read the whole file content once for simplicity 
             # (In production, streaming read is better)
@@ -64,7 +64,7 @@ class BitStreamIO:
             self.count = 0
 
     def close_write(self):
-        # Padding du dernier octet si nécessaire
+        # Padding last byte if necessary
         if self.count > 0:
             self.buffer = (self.buffer << (8 - self.count))
             self.file.write(bytes([self.buffer]))
@@ -74,7 +74,7 @@ class BitStreamIO:
         return self._iterator
 
     def _bit_generator(self):
-        # Générateur pour lire bit par bit, à partir de read_ptr (après header)
+        # Generator to read bit by bit, from read_ptr (after header)
         while self.read_ptr < len(self.read_buffer):
             byte = self.read_buffer[self.read_ptr]
             self.read_ptr += 1
@@ -89,7 +89,7 @@ def pdf_to_cdf(pdf_tensor):
     return cdf
 
 class DaemonArithmeticCoder:
-    """Moteur mathématique de compression"""
+    """Mathematical Compression Engine"""
     def __init__(self, bit_writer=None):
         self.low = 0
         self.high = TOP_VALUE
@@ -137,13 +137,13 @@ class DaemonArithmeticCoder:
             self._emit(1)
 
 class DaemonDecoder:
-    """Moteur mathématique de décompression"""
+    """Mathematical Decompression Engine"""
     def __init__(self, bit_iterator):
         self.bit_iterator = bit_iterator
         self.low = 0
         self.high = TOP_VALUE
         self.value = 0
-        # Remplissage initial
+        # Initial fill
         for _ in range(CODE_VALUE_BITS):
             try:
                 self.value = (self.value << 1) | next(self.bit_iterator)
@@ -192,8 +192,8 @@ class DaemonDecoder:
 
 class NeuralPredictor(nn.Module):
     """
-    Modèle Autoregressif pour l'estimation de densité de probabilité.
-    (Fusionné depuis nfr_engine.py)
+    Autoregressive Model for Probability Density Estimation.
+    (Merged from nfr_engine.py)
     """
     def __init__(self, config):
         super(NeuralPredictor, self).__init__()
@@ -205,12 +205,12 @@ class NeuralPredictor(nn.Module):
         
     def forward(self, x, hidden):
         # x: [batch, seq_len]
-        # Dans ce pipeline, x est [1, seq_len]
+        # In this pipeline, x is [1, seq_len]
         embedded = self.embed(x)
         output, hidden = self.lstm(embedded, hidden)
         
-        # Nous avons besoin des logits pour le DERNIER élément de la séquence 
-        # pour prédire le PROCHAIN.
+        # We need logits for the LAST element of the sequence
+        # to predict the NEXT one.
         # output shape: [1, seq_len, hidden]
         last_step_output = output[:, -1, :] # [1, hidden]
         
@@ -219,13 +219,13 @@ class NeuralPredictor(nn.Module):
         return probs
 
 def train_network(model, data_bytes):
-    """Mini boucle d'entrainement pour le PoC (Overfitting sur le fichier)"""
+    """Mini Training Loop for PoC (Overfitting on file)"""
     data_indices = np.frombuffer(data_bytes, dtype=np.uint8)
     optimizer = optim.Adam(model.parameters(), lr=CONFIG['lr'])
     criterion = nn.CrossEntropyLoss()
     model.train()
     
-    print(f"[SYSTEM] Entrainement du NeuralPredictor sur {len(data_bytes)} octets...")
+    print(f"[SYSTEM] Training NeuralPredictor on {len(data_bytes)} bytes...")
     for epoch in range(CONFIG['epochs']):
         epoch_loss = 0
         chunks = 0
@@ -234,9 +234,9 @@ def train_network(model, data_bytes):
             target_seq = torch.tensor(data_indices[i+1:i+CONFIG['seq_len']+1], dtype=torch.long).unsqueeze(0).to(CONFIG['device'])
             
             model.zero_grad()
-            # Note: Le modèle retourne les probs dans forward() pour l'inférence.
-            # Pour l'entrainement, il faut modifier un peu ou utiliser la logique interne.
-            # On va utiliser la logique LSTM directement ici pour simplifier (copié de nfr_engine.py)
+            # Note: Model returns probs in forward() for inference.
+            # For training, we need to adapt slightly or use internal logic.
+            # We use LSTM logic directly here to simplify (copied from nfr_engine.py)
             
             embedded = model.embed(input_seq)
             output, _ = model.lstm(embedded)
@@ -253,55 +253,55 @@ def train_network(model, data_bytes):
             print(f"Epoch {epoch+1}: Loss = {epoch_loss/chunks:.4f}")
     return model
 
-# --- FONCTIONS MAÎTRESSES ---
+# --- MASTER FUNCTIONS ---
 
 def compress_file(input_path, output_path, model):
-    print(f">> DAEMON: COMPRESSION DE {input_path}...")
+    print(f">> DAEMON: COMPRESSING {input_path}...")
     start_time = time.time()
     
-    # 1. Lire les données brutes
+    # 1. Read Raw Data
     with open(input_path, 'rb') as f:
         data = f.read()
     
     original_size = len(data)
     
-    # 2. Entrainer le modèle sur ce fichier (Mode Archive Self-contained PoC)
-    # Dans la pratique, on aurait un modèle pré-entrainé universel 
-    # ou on stokerait les poids compressés dans le header.
-    # Ici, nous supposons que le destinataire a le même script d'entrainement 
-    # et va ré-entrainer (ce qui est triché), OU que le modèle est déjà bon.
-    # Pour ce PoC "Archive", nous allons entrainer le modèle "fresh".
+    # 2. Train model on this file (Archive Self-contained PoC Mode)
+    # In practice, we would typically have a universal pre-trained model
+    # or store compressed weights in the header.
+    # Here, we assume the recipient has the same training script
+    # and will re-train (which is cheating), OR that the model is already good.
+    # For this "Archive" PoC, we will train the model "fresh".
     train_network(model, data)
 
-    # 3. Initialiser le flux de sortie
+    # 3. Initialize Output Stream
     bit_io = BitStreamIO(output_path, 'wb')
     
-    # 4. ÉCRIRE LE HEADER (Taille du fichier)
+    # 4. WRITE HEADER (File Size)
     print(f">> HEADER: Writing Size {original_size}")
     bit_io.write_header(original_size)
     
     encoder = DaemonArithmeticCoder(bit_io)
     
-    # 5. Initialiser le contexte (Padding de zéros)
+    # 5. Initialize Context (Zero Padding)
     context = [0] * MODEL_SEQ_LEN
     
     model.eval()
     with torch.no_grad():
         for i, byte in enumerate(data):
             if i % 100 == 0:
-                print(f"\r>> PROGRES: {i}/{len(data)} bytes", end="")
+                print(f"\r>> PROGRESS: {i}/{len(data)} bytes", end="")
             
-            # Préparer le contexte tensoriel (Shape: [1, seq_len])
+            # Prepare Tensor Context (Shape: [1, seq_len])
             input_tensor = torch.tensor([context], dtype=torch.long).to(CONFIG['device'])
             
-            # PRÉDICTION NEURONALE
-            probs = model(input_tensor, None) # Retourne probs [1, 256] (voir nouveau forward)
-            probs = probs[0].cpu() # Sur CPU pour arithmétique
+            # NEURAL PREDICTION
+            probs = model(input_tensor, None) # Returns probs [1, 256] (see new forward)
+            probs = probs[0].cpu() # On CPU for arithmetic
             
-            # ENCODAGE ARITHMÉTIQUE
+            # ARITHMETIC ENCODING
             encoder.encode_symbol(byte, probs)
             
-            # Mise à jour du contexte (Glissement)
+            # Update Context (Shift)
             context.pop(0)
             context.append(byte)
 
@@ -311,15 +311,15 @@ def compress_file(input_path, output_path, model):
     compressed_size = os.path.getsize(output_path)
     ratio = (1 - compressed_size/original_size) * 100
     
-    print(f"\n>> TERMINÉ. Ratio: {ratio:.2f}% | Temps: {time.time() - start_time:.2f}s")
-    print(f">> FICHIER CRÉÉ: {output_path} ({compressed_size} bytes)")
+    print(f"\n>> DONE. Ratio: {ratio:.2f}% | Time: {time.time() - start_time:.2f}s")
+    print(f">> FILE CREATED: {output_path} ({compressed_size} bytes)")
 
 def decompress_file(input_path, output_path, model):
-    print(f">> DAEMON: DÉCOMPRESSION DE {input_path}...")
+    print(f">> DAEMON: DECOMPRESSING {input_path}...")
     
     bit_io = BitStreamIO(input_path, 'rb')
     
-    # 1. LIRE LE HEADER
+    # 1. READ HEADER
     original_size = bit_io.read_header()
     print(f">> HEADER: Read Size {original_size}")
     
@@ -329,62 +329,62 @@ def decompress_file(input_path, output_path, model):
     decoded_data = bytearray()
     context = [0] * MODEL_SEQ_LEN
     
-    # NOTE IMPORTANTE: Le modèle doit être dans le MÊME ÉTAT que lors de la compression.
-    # Si nous avons fait un training "live" lors de la compression, 
-    # le décompresseur doit avoir les poids exacts.
-    # Pour ce PoC, l'objet 'model' passé en argument est déjà entrainé (car on est dans le même script).
-    # Dans un vrai usage, il faudrait charger les poids.
+    # IMPORTANT NOTE: The model must be in the SAME STATE as during compression.
+    # If we did "live" training during compression,
+    # the decompressor must have exact weights.
+    # For this PoC, the 'model' object passed as argument is already trained (same memory session).
+    # In real usage, weights should be loaded.
     
     model.eval()
     with torch.no_grad():
         for i in range(original_size):
             if i % 100 == 0:
-                print(f"\r>> PROGRES: {i}/{original_size} bytes", end="")
+                print(f"\r>> PROGRESS: {i}/{original_size} bytes", end="")
                 
             input_tensor = torch.tensor([context], dtype=torch.long).to(CONFIG['device'])
             
-            # PRÉDICTION NEURONALE
+            # NEURAL PREDICTION
             probs = model(input_tensor, None)
             probs = probs[0].cpu()
             
-            # DÉCODAGE ARITHMÉTIQUE
+            # ARITHMETIC DECODING
             symbol = decoder.decode_symbol(probs)
             
             decoded_data.append(symbol)
             
-            # Mise à jour contexte
+            # Update Context
             context.pop(0)
             context.append(symbol)
             
     with open(output_path, 'wb') as f:
         f.write(decoded_data)
-    print("\n>> DÉCOMPRESSION TERMINÉE.")
+    print("\n>> DECOMPRESSION FINISHED.")
 
 # --- EXECUTION ---
 if __name__ == "__main__":
-    # Test Data: Code source complexe + binaire (le pattern est important pour voir la compression)
+    # Test Data: Complex Source Code + Binary (Pattern is important to see compression)
     dummy_data = b"DAEMON_IS_WATCHING_YOU_" * 20 + os.urandom(50)
     with open("daemon_test.bin", "wb") as f:
         f.write(dummy_data)
         
-    # Initialisation du modèle
+    # Initialize Model
     model = NeuralPredictor(CONFIG).to(CONFIG['device'])
     
-    # 1. Compression (Incluant le training on-the-fly)
+    # 1. Compression (Including on-the-fly training)
     compress_file("daemon_test.bin", "daemon_test.dmn", model)
     
-    # 2. Décompression (Le fichier .dmn contient maintenant la taille en header)
-    # model a les poids entrainés car on est dans la même session mémoire.
+    # 2. Decompression (.dmn file contains header size)
+    # model has trained weights because we are in the same memory session.
     decompress_file("daemon_test.dmn", "daemon_restored.bin", model)
     
-    # Vérification
+    # Verification
     with open("daemon_restored.bin", "rb") as f:
         restored = f.read()
     
     if restored == dummy_data:
-        print(">> INTEGRITÉ CONFIRMÉE: 100%")
+        print(">> INTEGRITY CONFIRMED: 100%")
     else:
-        print(">> ERREUR CRITIQUE DANS LA MATRICE.")
+        print(">> CRITICAL ERROR IN THE MATRIX.")
         print(f"Original: {len(dummy_data)}, Restored: {len(restored)}")
         for j in range(min(len(dummy_data), len(restored))):
              if dummy_data[j] != restored[j]:

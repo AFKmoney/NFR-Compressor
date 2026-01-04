@@ -22,8 +22,18 @@ git clone https://github.com/AFKmoney/NFR-Compressor.git
 cd NFR-Compressor
 
 # Install dependencies
-pip install torch numpy
+pip install torch numpy flask
 ```
+
+## 🖥️ Web Interface (GUI)
+
+For a user-friendly drag-and-drop experience, you can launch the local web server.
+
+```bash
+python gui/app.py
+```
+*   **URL:** `http://127.0.0.1:5000`
+*   **Features:** Drag & Drop compression, real-time log streaming, and visual metrics.
 
 *Note: CUDA is highly recommended for performance, but the engine runs on CPU automatically if CUDA is unavailable.*
 

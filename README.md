@@ -18,8 +18,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/NFR-Engine.git
-cd NFR-Engine
+git clone https://github.com/AFKmoney/NFR-Compressor.git
+cd NFR-Compressor
 
 # Install dependencies
 pip install torch numpy

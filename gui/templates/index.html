@@ -1,0 +1,93 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NFR Compressor | Neural Fractal Reconstruction</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <!-- Google Fonts for Premium Look -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="background-globes">
+        <div class="globe globe-1"></div>
+        <div class="globe globe-2"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <div class="logo">
+                <span class="daemon">DAEMON</span> <span class="nfr">NFR</span>
+            </div>
+            <div class="status">SYSTEM ONLINE</div>
+        </header>
+
+        <main>
+            <div class="card glass-panel">
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="switchTab('compress')">COMPRESS</button>
+                    <button class="tab-btn" onclick="switchTab('decompress')">DECOMPRESS</button>
+                </div>
+
+                <div id="drop-zone" class="drop-zone">
+                    <div class="icon">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="17 8 12 3 7 8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                    </div>
+                    <h2>Drag & Drop File Here</h2>
+                    <p>or click to browse</p>
+                    <input type="file" id="file-input" hidden>
+                </div>
+
+                <div class="controls">
+                    <div id="file-info" class="file-info hidden">
+                        <span id="filename">selected_file.txt</span>
+                        <span id="filesize">0 KB</span>
+                    </div>
+                    <button id="action-btn" class="action-btn" disabled>INITIALIZE NEURAL LINK</button>
+                </div>
+            </div>
+
+            <div id="terminal" class="terminal glass-panel hidden">
+                <div class="terminal-header">
+                    <span class="dot red"></span>
+                    <span class="dot yellow"></span>
+                    <span class="dot green"></span>
+                    <span class="title">NFR_ENGINE_LOGS</span>
+                </div>
+                <div class="terminal-body" id="logs">
+                    <div class="log-line">Waiting for input stream...</div>
+                </div>
+            </div>
+
+            <div id="result-overlay" class="result-overlay hidden">
+                <div class="result-card glass-panel">
+                    <h3>OPERATION COMPLETE</h3>
+                    <div class="stats">
+                        <div class="stat-item">
+                            <span class="label">Original</span>
+                            <span class="value" id="res-original">100 KB</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="label">Compressed</span>
+                            <span class="value" id="res-compressed">45 KB</span>
+                        </div>
+                        <div class="stat-item highlight">
+                            <span class="label">Ratio</span>
+                            <span class="value" id="res-ratio">2.2x</span>
+                        </div>
+                    </div>
+                    <button class="download-btn" id="download-btn">DOWNLOAD ARTIFACT</button>
+                    <button class="close-btn" onclick="closeResult()">CLOSE</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

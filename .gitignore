@@ -16,3 +16,6 @@ log*.txt
 test_restored*
 test_output*
 daemon_test*
+
+# GUI uploads
+gui_uploads/

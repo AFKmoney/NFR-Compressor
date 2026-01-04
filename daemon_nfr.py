@@ -23,14 +23,15 @@ import struct
 import time
 import hashlib
 import sys
+import numpy as np
 from typing import BinaryIO, Generator, List, Tuple
 
 # --- CONFIGURATION CONSTANTS ---
 MAGIC_HEADER = b'DMNv1'
 DEFAULT_CONFIG = {
-    'hidden_size': 512,
+    'hidden_size': 768, # V2.0: Bigger Brain
     'num_layers': 3,
-    'seq_len': 64,
+    'seq_len': 128,     # V2.0: Longer Context
     'vocab_size': 256,
     'embedding_dim': 64,
     'dropout': 0.1
@@ -195,24 +196,30 @@ class NFREngine:
         # Simple non-batched loop for PoC clarity (Batched is faster but complex to pad)
         # Using Batch Size = 1 for 'Text-Book' implementation
         
+        # Optimization: Sliding Window with overlap
+        # V2.0 UPGRADE: We use a stride smaller than seq_len to generate more training examples.
+        # This acts as Data Augmentation.
+        stride = 16 # Overlap factor. Smaller stride = More data = Better compression = Slower training.
+        
         for epoch in range(epochs):
             total_loss = 0
             steps = 0
             
-            # Optimization: Create batches of sequences
-            # Sliding window with step = seq_len
-            for i in range(0, len(data_indices) - seq_len - 1, seq_len):
-                input_batch = torch.tensor(data_indices[i:i+seq_len], dtype=torch.long).unsqueeze(0).to(self.model.device)
-                target_batch = torch.tensor(data_indices[i+1:i+seq_len+1], dtype=torch.long).unsqueeze(0).to(self.model.device)
+            # Helper to shuffle batches could go here, but sequential is fine for LSTM state
+            
+            for i in range(0, len(data_indices) - seq_len - 1, stride):
+                # Batch Size 1
+                input_seq = torch.tensor(data_indices[i:i+seq_len], dtype=torch.long).unsqueeze(0).to(self.model.device)
+                target_seq = torch.tensor(data_indices[i+1:i+seq_len+1], dtype=torch.long).unsqueeze(0).to(self.model.device)
                 
                 optimizer.zero_grad()
                 
-                # Forward (Train mode) - We need full sequence output
-                emb = self.model.embed(input_batch)
+                # Forward
+                emb = self.model.embed(input_seq)
                 out, _ = self.model.lstm(emb)
-                logits = self.model.fc(out) # [1, seq_len, 256]
+                logits = self.model.fc(out) 
                 
-                loss = criterion(logits.view(-1, 256), target_batch.view(-1))
+                loss = criterion(logits.view(-1, 256), target_seq.view(-1))
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), 5)
                 optimizer.step()
@@ -221,9 +228,9 @@ class NFREngine:
                 steps += 1
             
             if steps > 0:
-                print(f" > Epoch {epoch+1}/{epochs} | Loss: {total_loss/steps:.4f}")
+                print(f" > Epoch {epoch+1}/{epochs} | Loss: {total_loss/steps:.4f} | Steps: {steps}")
             else:
-                print(f" > Epoch {epoch+1}/{epochs} | Skipped (Data too short for seq_len)")
+                print(f" > Epoch {epoch+1}/{epochs} | Skipped (Data too short)")
         
         self.model.eval()
 

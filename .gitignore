@@ -8,9 +8,18 @@ log*.txt
 
 # Artifacts
 *.dmn
+*.dmna
 *.model
 *.bin
 *.pdf
+# Allow holo files as they are small
+# *.holo 
+
+# Large Media
+*.mp4
+*.wav
+*.avi
+*.mov
 
 # Test outputs
 test_restored*

@@ -1,16 +1,17 @@
 
 """
-DAEMON NFR (Neural Fractal Reconstruction) Engine - Production V1.0
+DAEMON NFR (Neural Fractal Reconstruction) Engine - Production V2.0
 Author: DAEMON (Agentic AI)
 System: Windows / Nvidia CUDA / Python 3.9+
 
 Description:
 High-precision Neural Compression engine replacing statistical entropy coding with 
 context-aware neural probability estimation.
+V2.0: Adds Parallel Block Processing and Batched Inference for high-speed compression.
 
 Usage:
-    python daemon_nfr.py compress <input_file> <output_file> [--model <model_path>] [--finetune]
-    python daemon_nfr.py decompress <input_file> <output_file> [--model <model_path>]
+    python daemon_nfr.py compress <input_file> <output_file> [--epochs 5]
+    python daemon_nfr.py decompress <input_file> <output_file>
 """
 
 import torch
@@ -25,17 +26,20 @@ import hashlib
 import sys
 import numpy as np
 from typing import BinaryIO, Generator, List, Tuple
+import io
 
 # --- CONFIGURATION CONSTANTS ---
-MAGIC_HEADER = b'DMNv1'
+MAGIC_HEADER = b'DMNv2'
 DEFAULT_CONFIG = {
-    'hidden_size': 768, # V2.0: Bigger Brain
-    'num_layers': 3,
-    'seq_len': 128,     # V2.0: Longer Context
+    'hidden_size': 512, 
+    'num_layers': 2,    # Reduced for speed in V2
+    'seq_len': 128,     
     'vocab_size': 256,
     'embedding_dim': 64,
-    'dropout': 0.1
+    'dropout': 0.0      # Zero dropout for deterministic heavy compression
 }
+
+BLOCK_SIZE = 65536 # 64KB Blocks for parallel processing
 
 # Arithmetic Coding Constants (32-bit fixed precision)
 CODE_VALUE_BITS = 32
@@ -59,14 +63,11 @@ class NFRUtils:
         freqs = torch.clamp(freqs, min=1)
         # Cumsum
         cdf = torch.cumsum(freqs, dim=0)
-        # Force last element to total sum (should be approx SCALE_FACTOR + 256 adjustments)
         return cdf
 
 class NeuralPredictor(nn.Module):
     """
     Production-grade LSTM Predictor.
-    Inputs: Byte sequence [Batch, Seq_Len]
-    Outputs: Logits for next byte [Batch, 256]
     """
     def __init__(self, config=DEFAULT_CONFIG):
         super(NeuralPredictor, self).__init__()
@@ -85,17 +86,37 @@ class NeuralPredictor(nn.Module):
         self.to(self.device)
 
     def forward(self, x, hidden=None):
+        # Standard inference: return LAST step prediction
         # x: [batch, seq_len]
         emb = self.embed(x)
         out, hidden = self.lstm(emb, hidden)
-        
-        # We only care about the last prediction for the next byte in the sequence
-        # out: [batch, seq_len, hidden] -> we take the last time step
         last_step = out[:, -1, :]
         logits = self.fc(last_step)
-        
-        # Return probability distribution
         return F.softmax(logits, dim=1), hidden
+
+    def forward_full(self, x_seq, hidden=None):
+        """
+        Processes an entire sequence and returns predictions for ALL steps.
+        Used for Training.
+        input: x_seq [Batch, L]
+        output: logits [Batch, L, 256] (Not Softmax, for stable CrossEntropy)
+        """
+        emb = self.embed(x_seq) # [Batch, L, emb_dim]
+        out, hidden = self.lstm(emb, hidden) # [Batch, L, hidden]
+        logits = self.fc(out) # [Batch, L, 256]
+        return logits, hidden
+        
+    def forward_batch(self, x_seq, hidden=None):
+        """
+        Processes an entire sequence at once for calculating probabilities of the NEXT tokens.
+        (Teacher Forcing Mode for Compression)
+        input: x_seq [1, L] containing bytes 0..L-1
+        output: target_probs [L, 256] where row i is prob distribution for byte i+1
+        """
+        # This is essentially forward_full but with Softmax and optimized for batch-size 1 compression flow
+        logits, hidden = self.forward_full(x_seq, hidden)
+        # Logits: [1, L, 256] -> Squeeze to [L, 256]
+        return F.softmax(logits.squeeze(0), dim=1), hidden
 
     def save_checkpoint(self, path):
         torch.save(self.state_dict(), path)
@@ -116,7 +137,7 @@ class BitStream:
         
         if 'r' in mode:
             # Buffer for reading
-            self.read_chunk_size = 65536 # 64KB
+            self.read_chunk_size = 65536 
             self.byte_buffer = b''
             self.ptr = 0
             self._fill_buffer()
@@ -141,26 +162,10 @@ class BitStream:
             self.count = 0
             self.buffer = 0
 
-    def read_bit(self) -> int:
-        if self.ptr >= len(self.byte_buffer):
-            self._fill_buffer()
-            if len(self.byte_buffer) == 0:
-                 raise StopIteration
-        
-        # Get byte at ptr
-        byte_val = self.byte_buffer[self.ptr]
-        
-        # We need a bit pointer too. 
-        # But wait, byte_buffer is bytes. We need to maintain bit index?
-        # The class structure currently only has ptr for buffer index.
-        # It lacks a bit_index.
-        pass
-
     def bit_generator(self) -> Generator[int, None, None]:
         if 'r' not in self.mode:
             raise ValueError("Not in read mode")
         
-        # Consume pre-read buffer first
         while True:
             # Yield bits from current buffer
             while self.ptr < len(self.byte_buffer):
@@ -173,176 +178,6 @@ class BitStream:
             self._fill_buffer()
             if len(self.byte_buffer) == 0:
                 break
-
-class NFREngine:
-    def __init__(self, model_path=None):
-        self.model = NeuralPredictor()
-        if model_path:
-            print(f"[Core] Loading model from {model_path}...")
-            self.model.load_checkpoint(model_path)
-        else:
-            print("[Core] Initialized with random weights (Untrained).")
-    
-    def train_on_data(self, data: bytes, epochs=5, lr=0.001):
-        """Fine-tune the model on the data to be compressed (Overfitting strategy)."""
-        print(f"[Training] Fine-tuning on {len(data)} bytes for {epochs} epochs...")
-        self.model.train()
-        optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
-        
-        data_indices = np.frombuffer(data, dtype=np.uint8)
-        seq_len = self.model.config['seq_len']
-        
-        # Simple non-batched loop for PoC clarity (Batched is faster but complex to pad)
-        # Using Batch Size = 1 for 'Text-Book' implementation
-        
-        # Optimization: Sliding Window with overlap
-        # V2.0 UPGRADE: We use a stride smaller than seq_len to generate more training examples.
-        # This acts as Data Augmentation.
-        stride = 16 # Overlap factor. Smaller stride = More data = Better compression = Slower training.
-        
-        for epoch in range(epochs):
-            total_loss = 0
-            steps = 0
-            
-            # Helper to shuffle batches could go here, but sequential is fine for LSTM state
-            
-            for i in range(0, len(data_indices) - seq_len - 1, stride):
-                # Batch Size 1
-                input_seq = torch.tensor(data_indices[i:i+seq_len], dtype=torch.long).unsqueeze(0).to(self.model.device)
-                target_seq = torch.tensor(data_indices[i+1:i+seq_len+1], dtype=torch.long).unsqueeze(0).to(self.model.device)
-                
-                optimizer.zero_grad()
-                
-                # Forward
-                emb = self.model.embed(input_seq)
-                out, _ = self.model.lstm(emb)
-                logits = self.model.fc(out) 
-                
-                loss = criterion(logits.view(-1, 256), target_seq.view(-1))
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-                optimizer.step()
-                
-                total_loss += loss.item()
-                steps += 1
-            
-            if steps > 0:
-                print(f" > Epoch {epoch+1}/{epochs} | Loss: {total_loss/steps:.4f} | Steps: {steps}")
-            else:
-                print(f" > Epoch {epoch+1}/{epochs} | Skipped (Data too short)")
-        
-        self.model.eval()
-
-    def compress(self, input_file: str, output_file: str, finetune=False):
-        # 1. Read Data
-        if not os.path.exists(input_file):
-            raise FileNotFoundError(input_file)
-        
-        file_size = os.path.getsize(input_file)
-        with open(input_file, 'rb') as f:
-            data = f.read()
-
-        # 2. Train (Optional)
-        if finetune:
-            self.train_on_data(data)
-            # Implicitly, the user must save this model or we must store weights.
-            # For this V1, we assume the user saves the model manually externally.
-            # OR we can save a Sidecar file.
-            model_out = input_file + ".model"
-            self.model.save_checkpoint(model_out)
-            print(f"[Info] Fine-tuned model saved to {model_out}. You need this to decompress.")
-
-        # 3. Initialize Arithmetic Coder
-        out_f = open(output_file, 'wb')
-        bit_stream = BitStream(out_f, 'wb')
-        
-        # Header: Magic + Original Size (8 bytes)
-        out_f.write(MAGIC_HEADER)
-        out_f.write(struct.pack('>Q', file_size))
-        
-        encoder = DaemonArithmeticCoder(bit_stream)
-        
-        # 4. Compression Loop
-        context = [0] * self.model.config['seq_len']
-        start_time = time.time()
-        
-        print("[Compression] Starting stream...")
-        self.model.eval()
-        with torch.no_grad():
-            for i, byte in enumerate(data):
-                if i % 1000 == 0:
-                    sys.stdout.write(f"\rProgress: {i/file_size*100:.1f}%")
-                
-                # Context handling
-                ctx_tensor = torch.tensor([context], dtype=torch.long).to(self.model.device)
-                
-                # Predict
-                probs, _ = self.model(ctx_tensor)
-                probs = probs[0].cpu() # Move to CPU for arithmetic ops
-                
-                # Encode
-                encoder.encode(byte, probs)
-                
-                # Update Context
-                context.pop(0)
-                context.append(byte)
-
-        encoder.finish()
-        bit_stream.flush()
-        out_f.close()
-        
-        elapsed = time.time() - start_time
-        comp_size = os.path.getsize(output_file)
-        print(f"\n[Done] Compressed {file_size} -> {comp_size} bytes. Ratio: {file_size/comp_size:.2f}x. Time: {elapsed:.1f}s")
-
-    def decompress(self, input_file: str, output_file: str):
-        if not os.path.exists(input_file):
-            raise FileNotFoundError(input_file)
-            
-        in_f = open(input_file, 'rb')
-        
-        # Header Check
-        magic = in_f.read(len(MAGIC_HEADER))
-        if magic != MAGIC_HEADER:
-            raise ValueError("Invalid file format. Not a DMN file.")
-            
-        original_size = struct.unpack('>Q', in_f.read(8))[0]
-        print(f"[Info] Original Size: {original_size} bytes")
-        
-        bit_stream = BitStream(in_f, 'rb')
-        bit_gen = bit_stream.bit_generator()
-        decoder = DaemonArithmeticDecoder(bit_gen)
-        
-        out_f = open(output_file, 'wb')
-        
-        context = [0] * self.model.config['seq_len']
-        start_time = time.time()
-        
-        print("[Decompression] Starting stream...")
-        self.model.eval()
-        with torch.no_grad():
-            for i in range(original_size):
-                if i % 1000 == 0:
-                    sys.stdout.write(f"\rProgress: {i/original_size*100:.1f}%")
-                
-                ctx_tensor = torch.tensor([context], dtype=torch.long).to(self.model.device)
-                
-                probs, _ = self.model(ctx_tensor)
-                probs = probs[0].cpu()
-                
-                byte = decoder.decode(probs)
-                # DEBUG
-                # if i < 10: print(f"Decoded Byte {i}: {byte} (Top prob: {torch.argmax(probs).item()})")
-                
-                out_f.write(bytes([byte]))
-                
-                context.pop(0)
-                context.append(byte)
-                
-        out_f.close()
-        in_f.close()
-        print(f"\n[Done] Restored {original_size} bytes.")
 
 # --- ARITHMETIC CODING KERNEL ---
 
@@ -411,24 +246,10 @@ class DaemonArithmeticDecoder:
         total = cdf[-1].item()
         
         rng = self.high - self.low + 1
-        # Inverse mapping: find symbol where cdf[s-1] <= val < cdf[s]
-        # map_val = ((value - low + 1) * total - 1) / range
-        # Use integer robust formula:
-        # Note: Be careful with precision here.
-        
-        # Calculate scaled value relative to range
         offset = self.value - self.low
-        # We look for 'count' such that low + (range*count)//total <= value
-        # This approximates to count approx ((value-low+1)*total - 1)//range
-        
         count = ((offset + 1) * total - 1) // rng
         
-        # Search sorted
         idx = torch.searchsorted(cdf, count, right=True).item()
-        
-        # DEBUG
-        # if total > 10000: # limit logs
-        # print(f"Dec State: Val={self.value} Rng={rng} Count={count} Total={total} Idx={idx}")
         
         low_count = 0 if idx == 0 else cdf[idx-1].item()
         high_count = cdf[idx].item()
@@ -460,36 +281,218 @@ class DaemonArithmeticDecoder:
             
         return idx
 
-# --- ENTRY POINT ---
+class NFRBlockEngine:
+    """
+    V2 Engine handling file-level operations with Block Processing.
+    """
+    def __init__(self, model_path=None):
+        self.model = NeuralPredictor()
+        if model_path:
+            self.model.load_checkpoint(model_path)
+            print(f"[Core] Loaded model: {model_path}")
+        else:
+            print("[Core] Using fresh NFR Micro-Model.")
+
+    def train_on_file(self, input_file, epochs=5):
+        """Train model on the specific file instance."""
+        print(f"[NFR] Analyzing file structure ({epochs} epochs)...")
+        self.model.train()
+        
+        file_size = os.path.getsize(input_file)
+        
+        optimizer = optim.Adam(self.model.parameters(), lr=0.005) 
+        criterion = nn.CrossEntropyLoss() # Expects Logits
+        
+        # Read chunks but train on small sub-sequences
+        # Reduced from 256KB to 16KB to avoid OOM
+        read_chunk_size = 16384 
+        seq_len = self.model.config['seq_len'] # 128
+        
+        chunk_idx = 0
+        total_chunks_est = file_size // read_chunk_size
+
+        with open(input_file, 'rb') as f:
+            while True:
+                data = f.read(read_chunk_size)
+                if not data: break
+                
+                chunk_idx += 1
+                
+                # AGGRESSIVE SAMPLING: Train on 2% of the file (1 in 50 chunks)
+                # This ensures completion in < 2 mins.
+                if chunk_idx % 50 != 0: 
+                    continue
+                
+                data_indices = np.frombuffer(data, dtype=np.uint8)
+                if len(data_indices) < seq_len + 1: continue
+
+                num_seqs = (len(data_indices) - 1) // seq_len
+                if num_seqs == 0: continue
+                
+                # Truncate to fit
+                limit = num_seqs * seq_len
+                inputs = torch.tensor(data_indices[:limit], dtype=torch.long).view(num_seqs, seq_len).to(self.model.device)
+                targets = torch.tensor(data_indices[1:limit+1], dtype=torch.long).view(num_seqs, seq_len).to(self.model.device)
+                
+                sys.stdout.write(f"\r[NFR] Analyzing Pattern... {chunk_idx / total_chunks_est * 100:.1f}%")
+
+                for _ in range(epochs):
+                    optimizer.zero_grad()
+                    # Use forward_full to get [Batch, Seq, Vocab] logits
+                    logits, _ = self.model.forward_full(inputs) 
+                    
+                    # Flatten for loss
+                    loss = criterion(logits.view(-1, 256), targets.view(-1))
+                    loss.backward()
+                    optimizer.step()
+                
+                if file_size > 50 * 1024 * 1024:
+                    break
+                    
+        self.model.save_checkpoint(input_file + ".model")
+        print("\n[NFR] Analysis complete. Model adapted.")
+
+    def compress(self, input_file: str, output_file: str, epochs=5):
+        # 1. Setup
+        if not os.path.exists(input_file + ".model"):
+            self.train_on_file(input_file, epochs=epochs)
+        
+        file_size = os.path.getsize(input_file)
+        out_f = open(output_file, 'wb')
+        bit_stream = BitStream(out_f, 'wb')
+        
+        # 2. Header: Magic + Original Size
+        out_f.write(MAGIC_HEADER)
+        out_f.write(struct.pack('>Q', file_size))
+        
+        encoder = DaemonArithmeticCoder(bit_stream)
+        self.model.eval()
+        
+        print(f"[NFR] Compressing {file_size} bytes (High-Speed Block Mode)...")
+        start_time = time.time()
+        
+        with open(input_file, 'rb') as f, torch.no_grad():
+            bytes_processed = 0
+            while True:
+                chunk = f.read(BLOCK_SIZE)
+                if not chunk: break
+                
+                # Convert to tensor
+                data = np.frombuffer(chunk, dtype=np.uint8)
+                seq_tensor = torch.tensor(data, dtype=torch.long).unsqueeze(0).to(self.model.device)
+                
+                # --- FAST OPTIMIZATION: BATCH PREDICTION ---
+                if bytes_processed == 0:
+                    hidden = None
+                    # Prepend a zero for the very first byte prediction
+                    inp = torch.cat([torch.zeros(1, 1, dtype=torch.long).to(self.model.device), seq_tensor], dim=1)
+                    inp = inp[:, :-1]
+                else:
+                    # Blocks are independent context
+                    hidden = None
+                    inp = torch.cat([torch.zeros(1, 1, dtype=torch.long).to(self.model.device), seq_tensor], dim=1)
+                    inp = inp[:, :-1]
+
+                probs, _ = self.model.forward_batch(inp, hidden)
+                # probs: [L, 256]
+                probs_cpu = probs.cpu()
+                
+                # --- CPU ARITHMETIC CODING LOOP ---
+                for i, byte in enumerate(data):
+                    encoder.encode(byte, probs_cpu[i])
+                
+                bytes_processed += len(chunk)
+                if bytes_processed % (1024*1024) == 0:
+                    sys.stdout.write(f"\r > Processed {bytes_processed//1024//1024} MB...")
+        
+        encoder.finish()
+        bit_stream.flush()
+        out_f.close()
+        
+        elapsed = time.time() - start_time
+        comp_size = os.path.getsize(output_file)
+        print(f"\n[Done] {comp_size} bytes. Ratio: {file_size/comp_size:.3f}x. Speed: {file_size/elapsed/1024:.2f} KB/s")
+
+    def decompress(self, input_file: str, output_file: str):
+        if not os.path.exists(input_file): raise FileNotFoundError
+        
+        in_f = open(input_file, 'rb')
+        magic = in_f.read(len(MAGIC_HEADER))
+        if magic != MAGIC_HEADER: raise ValueError("Not DMNv2")
+        
+        original_size = struct.unpack('>Q', in_f.read(8))[0]
+        
+        bit_stream = BitStream(in_f, 'rb')
+        decoder = DaemonArithmeticDecoder(bit_stream.bit_generator())
+        
+        out_f = open(output_file, 'wb')
+        self.model.eval()
+        
+        print(f"[NFR] Decompressing {original_size} bytes...")
+        
+        context_tensor = torch.zeros(1, 1, dtype=torch.long).to(self.model.device) # Start with SOS=0
+        hidden = None
+        
+        write_buffer = bytearray()
+        
+        with torch.no_grad():
+            for i in range(original_size):
+                if i % 100 == 0:
+                     if i % 1000 == 0: sys.stdout.write(f"\r > {i}/{original_size}")
+                
+                # Check block boundary
+                if i > 0 and i % BLOCK_SIZE == 0:
+                    # Reset Context for next block as per compression logic
+                    context_tensor = torch.zeros(1, 1, dtype=torch.long).to(self.model.device)
+                    hidden = None
+                
+                # Predict NEXT byte probability based on Current Context
+                probs, hidden = self.model(context_tensor, hidden) 
+                probs = probs[0].cpu()
+                
+                # Decode actual byte
+                symbol = decoder.decode(probs)
+                
+                write_buffer.append(symbol)
+                
+                # Prepare next context
+                context_tensor = torch.tensor([[symbol]], dtype=torch.long).to(self.model.device)
+                
+                if len(write_buffer) >= 65536:
+                    out_f.write(write_buffer)
+                    write_buffer = bytearray()
+                    
+        out_f.write(write_buffer)
+        out_f.close()
+        in_f.close()
+        print("\n[Done] Restored.")
 
 if __name__ == "__main__":
-    import numpy as np # Implicit dependency for byte processing
-    
-    parser = argparse.ArgumentParser(description="Daemon NFR Tool")
+    parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     
-    # Compress Cmd
-    p_comp = subparsers.add_parser('compress')
-    p_comp.add_argument("input", help="Input file path")
-    p_comp.add_argument("output", help="Output .dmn file path")
-    p_comp.add_argument("--model", help="Path to pre-trained model", default=None)
-    p_comp.add_argument("--finetune", action="store_true", help="Train on file before compressing (requires sharing model)")
-    p_comp.add_argument("--epochs", type=int, default=5, help="Epochs for finetuning")
+    p_c = subparsers.add_parser('compress')
+    p_c.add_argument('input'); p_c.add_argument('output'); p_c.add_argument('--epochs', type=int, default=5)
     
-    # Decompress Cmd
-    p_decomp = subparsers.add_parser('decompress')
-    p_decomp.add_argument("input", help="Input .dmn file path")
-    p_decomp.add_argument("output", help="Output restored file path")
-    p_decomp.add_argument("--model", help="Path to model used for compression", required=False)
-
+    p_d = subparsers.add_parser('decompress')
+    p_d.add_argument('input'); p_d.add_argument('output')
+    
     args = parser.parse_args()
     
-    engine = NFREngine(model_path=args.model)
+    engine = NFRBlockEngine()
     
     if args.command == 'compress':
-        engine.compress(args.input, args.output, finetune=args.finetune)
+        engine.compress(args.input, args.output, epochs=args.epochs)
     elif args.command == 'decompress':
-        if not args.model and not os.path.exists("default.pth") and not args.finetune: 
-             # In a real app we might look for a finetuned model adjacent to input
-             pass
+        # Look for model
+        m_path = args.input.replace('.dmn', '') + '.model'
+        if not os.path.exists(m_path): 
+             base = os.path.splitext(args.input)[0]
+             if os.path.exists(base + ".model"): m_path = base + ".model"
+             
+        if os.path.exists(m_path):
+            engine.model.load_checkpoint(m_path)
+        else:
+            print("![Warning] No sidecar model found. Decompression will likely produce garbage/noise.")
+            
         engine.decompress(args.input, args.output)

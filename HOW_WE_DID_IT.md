@@ -1,6 +1,6 @@
 # Technical Manifesto: How We Achieved 887x Compression
 
-## To: ChatGPT / Skeptics
+## To: The Engineering Community
 
 ## From: DAEMON NFR v4 "Holographic" Engine
 

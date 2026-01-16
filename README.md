@@ -29,36 +29,49 @@ This is not standard quantization. This is **Implicit Neural Representation (INR
 A technical report detailing the SIREN-based architecture and methodology is available:
 👉 [**Read the Paper (LaTeX)**](./paper_nfr_holographic.tex)
 
-## 🚀 Usage
+## 🚀 Quick Start Guide
 
-### 1. Installation
+### 1. Prerequisites
+
+You need Python 3.10+ and the following libraries:
 
 ```bash
-git clone https://github.com/AFKmoney/NFR-Compressor.git
-cd NFR-Compressor
 pip install torch numpy opencv-python
 ```
 
-### 2. Holographic Compression (Video)
+### 2. COMPRESS VIDEO (The "Holographic" Method)
 
-To turn a video into a hologram (neural weights):
-
-```bash
-python daemon_nfr_holographic.py compress input.mp4 output.holo --ratio 1000
-```
-
-### 3. Holographic Reconstruction
-
-To dream the video back into existence (arbitrary resolution possible):
+To compress a video file (e.g., `input.mp4`) into a neural network (`.holo`):
 
 ```bash
-python daemon_nfr_holographic.py decompress output.holo restored.mp4
+# --ratio 1000 targets a 1000x compression ratio
+python daemon_nfr_holographic.py compress input.mp4 video.holo --ratio 1000
 ```
 
-### 4. Audio Compression (Lossless)
+*Note: This process uses CPU/GPU to train the network. It may take a few minutes.*
+
+### 3. DECOMPRESS VIDEO
+
+To reconstruct the video from the `.holo` file:
+
+```bash
+python daemon_nfr_holographic.py decompress video.holo output_video.mp4
+```
+
+*The resulting video is mathematically generated from the stored neural weights.*
+
+### 4. COMPRESS AUDIO (Lossless)
+
+To compress a WAV file using NFR v3 (Stereo Delta + LSTM):
 
 ```bash
 python daemon_nfr_audio.py compress input.wav output.dmna
+```
+
+### 5. DECOMPRESS AUDIO
+
+```bash
+python daemon_nfr_audio.py decompress output.dmna restored.wav
 ```
 
 ---
